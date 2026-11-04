@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>PgManagement.Infrastructure</RootNamespace>
+    <AssemblyName>PgManagement.Infrastructure</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PgManagement.Domain\PgManagement.Domain.csproj" />
+    <ProjectReference Include="..\PgManagement.Application\PgManagement.Application.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.89" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+  </ItemGroup>
+</Project>
