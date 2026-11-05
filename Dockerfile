@@ -1,6 +1,6 @@
 
 # ================= BUILD STAGE =================
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0-preview AS build
 
 WORKDIR /src
 
@@ -17,13 +17,13 @@ RUN dotnet publish src/PgManagement.Api/PgManagement.Api.csproj \
     --no-restore
 
 # ================= RUNTIME STAGE =================
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:11.0-preview AS final
 
 WORKDIR /app
 
 COPY --from=build /app/publish .
 
-# Render application port
+# Render dynamically sets $PORT (defaults to 10000 or 8080)
 ENV ASPNETCORE_URLS=http://+:10000
 
 EXPOSE 10000
