@@ -1,22 +1,32 @@
-# Step 1: Use official .NET SDK image for building the app
+
+# ================= BUILD STAGE =================
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+
 WORKDIR /src
 
-# Copy csproj and restore dependencies
-COPY *.csproj ./
-RUN dotnet restore
+# Copy entire solution and source code
+COPY . .
 
-# Copy everything else and build Release binaries
-COPY . ./
-RUN dotnet publish -c Release -o /app/out
+# Restore API project and its dependencies
+RUN dotnet restore src/PgManagement.Api/PgManagement.Api.csproj
 
-# Step 2: Use lightweight ASP.NET runtime image for running the app
+# Publish API project
+RUN dotnet publish src/PgManagement.Api/PgManagement.Api.csproj \
+    -c Release \
+    -o /app/publish \
+    --no-restore
+
+# ================= RUNTIME STAGE =================
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+
 WORKDIR /app
-COPY --from=build /app/out .
 
-# Expose port and start app
-ENV PORT=8080
-EXPOSE 8080
+COPY --from=build /app/publish .
 
-ENTRYPOINT ["dotnet", "PgManagement.dll"]
+# Render application port
+ENV ASPNETCORE_URLS=http://+:10000
+
+EXPOSE 10000
+
+# Application entry point
+ENTRYPOINT ["dotnet", "PgManagement.Api.dll"]
