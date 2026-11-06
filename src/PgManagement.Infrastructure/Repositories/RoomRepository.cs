@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using PgManagement.Application.DTOs;
 using PgManagement.Application.Interfaces;
@@ -10,8 +11,18 @@ namespace PgManagement.Infrastructure.Repositories
     public class RoomRepository : IRoomRepository
     {
         private readonly IDbConnectionFactory _factory;
+        private readonly INoSeriesService _noSeries;
+        private readonly IIdentityInformationService _identity;
 
-        public RoomRepository(IDbConnectionFactory factory) => _factory = factory;
+        public RoomRepository(
+            IDbConnectionFactory factory,
+            INoSeriesService noSeries,
+            IIdentityInformationService identity)
+        {
+            _factory = factory;
+            _noSeries = noSeries;
+            _identity = identity;
+        }
 
         private const string RoomProjectionSql = """
             SELECT r.room_id AS RoomId,
@@ -62,12 +73,81 @@ namespace PgManagement.Infrastructure.Repositories
         public async Task<Guid> CreateAsync(Room room)
         {
             using var conn = _factory.CreateConnection();
-            room.RoomId = Uuid7.NewGuid();
-            const string sql = @"
-                INSERT INTO rooms (room_id, floor_id, branch_id, room_code, room_number, room_type, total_beds, room_rent, has_attached_bathroom, has_ac, has_balcony, is_active, created_at)
-                VALUES (@RoomId, @FloorId, @BranchId, fn_next_room_code(), @RoomNumber, @RoomType, @TotalBeds, @RoomRent, @HasAttachedBathroom, @HasAc, @HasBalcony, @IsActive, @CreatedAt)
-                RETURNING room_id;";
-            return await conn.ExecuteScalarAsync<Guid>(sql, room);
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                room.RoomId = Uuid7.NewGuid();
+
+                // 1. Fetch next room code inside transaction SCOPED BY BRANCH ID
+                var code = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "R", room.BranchId);
+                room.RoomCode = code;
+
+                // 2. Insert with generated code
+                const string sql = @"
+                    INSERT INTO rooms (room_id, floor_id, branch_id, room_code, room_number, room_type, total_beds, room_rent, has_attached_bathroom, has_ac, has_balcony, is_active, created_at)
+                    VALUES (@RoomId, @FloorId, @BranchId, @RoomCode, @RoomNumber, @RoomType, @TotalBeds, @RoomRent, @HasAttachedBathroom, @HasAc, @HasBalcony, @IsActive, @CreatedAt)
+                    RETURNING room_id;";
+
+                var id = await conn.ExecuteScalarAsync<Guid>(sql, room, transaction: tran);
+                tran.Commit();
+                return id;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
+        }
+
+        public async Task<Room> CreateRoomWithBedsAsync(Room room, List<Bed> beds)
+        {
+            using var conn = _factory.CreateConnection();
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                room.RoomId = Uuid7.NewGuid();
+
+                // 1. Fetch next room code inside transaction scoped to branchId
+                var roomCode = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "R", room.BranchId);
+                room.RoomCode = roomCode;
+
+                // 2. Insert room
+                const string roomSql = @"
+                    INSERT INTO rooms (room_id, floor_id, branch_id, room_code, room_number, room_type, total_beds, room_rent, has_attached_bathroom, has_ac, has_balcony, is_active, created_at)
+                    VALUES (@RoomId, @FloorId, @BranchId, @RoomCode, @RoomNumber, @RoomType, @TotalBeds, @RoomRent, @HasAttachedBathroom, @HasAc, @HasBalcony, @IsActive, @CreatedAt)
+                    RETURNING room_id;";
+
+                var roomId = await conn.ExecuteScalarAsync<Guid>(roomSql, room, transaction: tran);
+
+                // 3. Insert each bed inside the transaction scoped to branchId
+                const string bedSql = @"
+                    INSERT INTO beds (bed_id, room_id, floor_id, branch_id, bed_code, bed_number, bed_rent, daily_rate, is_occupied, status, created_at)
+                    VALUES (@BedId, @RoomId, @FloorId, @BranchId, @BedCode, @BedNumber, @BedRent, @DailyRate, @IsOccupied, @Status, @CreatedAt);";
+
+                foreach (var bed in beds)
+                {
+                    bed.BedId = Uuid7.NewGuid();
+                    bed.RoomId = roomId;
+                    bed.FloorId = room.FloorId;
+                    bed.BranchId = room.BranchId;
+
+                    var bedCode = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "BED", room.BranchId);
+                    bed.BedCode = bedCode;
+
+                    await conn.ExecuteAsync(bedSql, bed, transaction: tran);
+                }
+
+                tran.Commit();
+                room.Beds = beds;
+                return room;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
         }
 
         public async Task<bool> UpdateAsync(Guid roomId, UpdateRoomDto dto)
@@ -123,12 +203,31 @@ namespace PgManagement.Infrastructure.Repositories
         public async Task<Guid> CreateBedAsync(Bed bed)
         {
             using var conn = _factory.CreateConnection();
-            bed.BedId = Uuid7.NewGuid();
-            const string sql = @"
-                INSERT INTO beds (bed_id, room_id, floor_id, branch_id, bed_code, bed_number, bed_rent, daily_rate, is_occupied, status, created_at)
-                VALUES (@BedId, @RoomId, @FloorId, @BranchId, fn_next_bed_code(), @BedNumber, @BedRent, @DailyRate, @IsOccupied, @Status, @CreatedAt)
-                RETURNING bed_id;";
-            return await conn.ExecuteScalarAsync<Guid>(sql, bed);
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                bed.BedId = Uuid7.NewGuid();
+
+                // 1. Fetch next bed code inside transaction SCOPED BY BRANCH ID
+                var code = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "BED", bed.BranchId);
+                bed.BedCode = code;
+
+                // 2. Insert with generated code
+                const string sql = @"
+                    INSERT INTO beds (bed_id, room_id, floor_id, branch_id, bed_code, bed_number, bed_rent, daily_rate, is_occupied, status, created_at)
+                    VALUES (@BedId, @RoomId, @FloorId, @BranchId, @BedCode, @BedNumber, @BedRent, @DailyRate, @IsOccupied, @Status, @CreatedAt)
+                    RETURNING bed_id;";
+
+                var id = await conn.ExecuteScalarAsync<Guid>(sql, bed, transaction: tran);
+                tran.Commit();
+                return id;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
         }
 
         public async Task UpdateBedOccupancyAsync(Guid bedId, bool isOccupied, string status)

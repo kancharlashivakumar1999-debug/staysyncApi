@@ -54,6 +54,8 @@ namespace PgManagement.Application.DTOs
         public string Email { get; set; } = string.Empty;
         public string PhoneNumber { get; set; } = string.Empty;
         public int ExpectedBranches { get; set; }
+        public string Role { get; set; } = "Owner";
+        public List<Guid> BranchIds { get; set; } = new();
         public string Token { get; set; } = string.Empty;
         public string RefreshToken { get; set; } = string.Empty;
     }

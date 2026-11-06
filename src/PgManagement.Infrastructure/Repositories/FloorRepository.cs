@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using PgManagement.Application.Interfaces;
 using PgManagement.Domain.Common;
@@ -9,8 +10,18 @@ namespace PgManagement.Infrastructure.Repositories
     public class FloorRepository : IFloorRepository
     {
         private readonly IDbConnectionFactory _factory;
+        private readonly INoSeriesService _noSeries;
+        private readonly IIdentityInformationService _identity;
 
-        public FloorRepository(IDbConnectionFactory factory) => _factory = factory;
+        public FloorRepository(
+            IDbConnectionFactory factory,
+            INoSeriesService noSeries,
+            IIdentityInformationService identity)
+        {
+            _factory = factory;
+            _noSeries = noSeries;
+            _identity = identity;
+        }
 
         private const string FloorProjectionSql = """
             SELECT f.floor_id AS FloorId,
@@ -40,12 +51,31 @@ namespace PgManagement.Infrastructure.Repositories
         public async Task<Guid> CreateAsync(Floor floor)
         {
             using var conn = _factory.CreateConnection();
-            floor.FloorId = Uuid7.NewGuid();
-            const string sql = @"
-                INSERT INTO floors (floor_id, branch_id, floor_code, floor_number, floor_name, description, created_at)
-                VALUES (@FloorId, @BranchId, fn_next_floor_code(), @FloorNumber, @FloorName, @Description, @CreatedAt)
-                RETURNING floor_id;";
-            return await conn.ExecuteScalarAsync<Guid>(sql, floor);
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                floor.FloorId = Uuid7.NewGuid();
+
+                // 1. Fetch next floor code inside transaction SCOPED BY BRANCH ID
+                var code = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "FL", floor.BranchId);
+                floor.FloorCode = code;
+
+                // 2. Insert with the generated code
+                const string sql = @"
+                    INSERT INTO floors (floor_id, branch_id, floor_code, floor_number, floor_name, description, created_at)
+                    VALUES (@FloorId, @BranchId, @FloorCode, @FloorNumber, @FloorName, @Description, @CreatedAt)
+                    RETURNING floor_id;";
+
+                var id = await conn.ExecuteScalarAsync<Guid>(sql, floor, transaction: tran);
+                tran.Commit();
+                return id;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
         }
 
         public async Task<bool> DeleteAsync(Guid floorId)

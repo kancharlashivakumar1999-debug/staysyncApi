@@ -6,8 +6,12 @@ using PgManagement.Application.Interfaces;
 using PgManagement.Application.Services;
 using PgManagement.Infrastructure.Data;
 using PgManagement.Infrastructure.Repositories;
+using PgManagement.Infrastructure.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Add HttpContextAccessor for identity extraction from JWT claims
+builder.Services.AddHttpContextAccessor();
 
 // Add services to the container.
 builder.Services.AddControllers();
@@ -66,6 +70,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 // Infrastructure & Data Dependency Injection
+builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IDbConnectionFactory, NpgsqlConnectionFactory>();
 
 // Repositories
@@ -84,6 +89,10 @@ builder.Services.AddScoped<IReportRepository, ReportRepository>();
 builder.Services.AddScoped<IPaymentAnalyticsRepository, PaymentAnalyticsRepository>();
 
 // Services
+builder.Services.AddScoped<IIdentityInformationService, IdentityInformationService>();
+builder.Services.AddScoped<INoSeriesService, NoSeriesService>();
+builder.Services.AddScoped<IWhatsAppNotificationService, WhatsAppNotificationService>();
+builder.Services.AddScoped<IEmailNotificationService, EmailNotificationService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IBranchService, BranchService>();
 builder.Services.AddScoped<IFloorService, FloorService>();
@@ -98,7 +107,7 @@ builder.Services.AddScoped<IVisitorService, VisitorService>();
 builder.Services.AddScoped<IReportService, ReportService>();
 builder.Services.AddScoped<IPaymentAnalyticsService, PaymentAnalyticsService>();
 
-var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
 builder.WebHost.UseUrls($"http://*:{port}");
 
 var app = builder.Build();

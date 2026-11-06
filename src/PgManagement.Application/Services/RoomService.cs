@@ -36,17 +36,14 @@ namespace PgManagement.Application.Services
                 IsActive = true
             };
 
-            var id = await _roomRepo.CreateAsync(room);
-            var created = await _roomRepo.GetByIdAsync(id);
-
+            var bedsToCreate = new List<Bed>();
             if (dto.AutoGenerateBeds && dto.TotalBeds > 0)
             {
                 char letter = 'A';
                 for (int i = 1; i <= dto.TotalBeds; i++)
                 {
-                    var bed = new Bed
+                    bedsToCreate.Add(new Bed
                     {
-                        RoomId = id,
                         FloorId = dto.FloorId,
                         BranchId = dto.BranchId,
                         BedNumber = $"{room.RoomNumber}-{letter++}",
@@ -54,11 +51,13 @@ namespace PgManagement.Application.Services
                         DailyRate = dto.DailyRate,
                         IsOccupied = false,
                         Status = "Available"
-                    };
-                    await _roomRepo.CreateBedAsync(bed);
+                    });
                 }
             }
-            return created ?? room;
+
+            // Create Room and all Auto-Generated Beds atomically under a single database transaction
+            var created = await _roomRepo.CreateRoomWithBedsAsync(room, bedsToCreate);
+            return created;
         }
 
         public async Task<Room> UpdateRoomAsync(Guid roomId, UpdateRoomDto dto)
@@ -79,12 +78,23 @@ namespace PgManagement.Application.Services
 
         public async Task<Bed> AddBedAsync(CreateBedDto dto)
         {
+            var room = await _roomRepo.GetByIdAsync(dto.RoomId);
+            var roomNum = room?.RoomNumber ?? "Room";
+
+            var bedNumber = dto.BedNumber;
+            if (string.IsNullOrWhiteSpace(bedNumber))
+            {
+                var existingBeds = (await _roomRepo.GetBedsByRoomIdAsync(dto.RoomId)).ToList();
+                char nextLetter = (char)('A' + existingBeds.Count);
+                bedNumber = $"{roomNum}-{nextLetter}";
+            }
+
             var bed = new Bed
             {
                 RoomId = dto.RoomId,
                 FloorId = dto.FloorId,
                 BranchId = dto.BranchId,
-                BedNumber = dto.BedNumber,
+                BedNumber = bedNumber,
                 BedRent = dto.BedRent,
                 DailyRate = dto.DailyRate,
                 IsOccupied = false,

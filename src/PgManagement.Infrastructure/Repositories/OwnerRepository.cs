@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using PgManagement.Application.Interfaces;
 using PgManagement.Domain.Common;
@@ -9,8 +10,13 @@ namespace PgManagement.Infrastructure.Repositories
     public class OwnerRepository : IOwnerRepository
     {
         private readonly IDbConnectionFactory _factory;
+        private readonly INoSeriesService _noSeries;
 
-        public OwnerRepository(IDbConnectionFactory factory) => _factory = factory;
+        public OwnerRepository(IDbConnectionFactory factory, INoSeriesService noSeries)
+        {
+            _factory = factory;
+            _noSeries = noSeries;
+        }
 
         private const string OwnerProjectionSql = """
             SELECT o.owner_id AS OwnerId,
@@ -54,12 +60,43 @@ namespace PgManagement.Infrastructure.Repositories
         public async Task<Guid> CreateAsync(Owner owner)
         {
             using var conn = _factory.CreateConnection();
-            owner.OwnerId = Uuid7.NewGuid();
-            const string sql = @"
-                INSERT INTO owners (owner_id, owner_code, full_name, email, phone_number, password_hash, expected_branches, created_at, updated_at)
-                VALUES (@OwnerId, fn_next_owner_code(), @FullName, @Email, @PhoneNumber, @PasswordHash, @ExpectedBranches, @CreatedAt, @UpdatedAt)
-                RETURNING owner_id;";
-            return await conn.ExecuteScalarAsync<Guid>(sql, owner);
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                owner.OwnerId = Uuid7.NewGuid();
+
+                // 1. Fetch next PO code using the system master series
+                var systemTenantId = Guid.Parse("00000000-0000-0000-0000-000000000001");
+                var code = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "PO", systemTenantId);
+                owner.OwnerCode = code;
+
+                // 2. Insert owner record
+                const string sql = @"
+                    INSERT INTO owners (owner_id, owner_code, full_name, email, phone_number, password_hash, expected_branches, created_at, updated_at)
+                    VALUES (@OwnerId, @OwnerCode, @FullName, @Email, @PhoneNumber, @PasswordHash, @ExpectedBranches, @CreatedAt, @UpdatedAt)
+                    RETURNING owner_id;";
+
+                var id = await conn.ExecuteScalarAsync<Guid>(sql, owner, transaction: tran);
+
+                // 3. Initialize config.no_series for the newly created user (cloning default series keys: BR, FL, R, BED, etc.)
+                const string seedSeriesSql = @"
+                    INSERT INTO config.no_series (tenant_id, series_key, prefix, next_no, pad_width, description, yearly)
+                    SELECT @OwnerId, ns.series_key, ns.prefix, 1, ns.pad_width, ns.description, ns.yearly
+                      FROM config.no_series ns
+                     WHERE ns.tenant_id = @SystemTenantId
+                    ON CONFLICT (tenant_id, series_key) DO NOTHING;";
+
+                await conn.ExecuteAsync(seedSeriesSql, new { OwnerId = id, SystemTenantId = systemTenantId }, transaction: tran);
+
+                tran.Commit();
+                return id;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
         }
 
         public async Task<bool> UpdateProfileAsync(Guid ownerId, string fullName, string phoneNumber, int expectedBranches)

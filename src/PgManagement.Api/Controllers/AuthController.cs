@@ -57,7 +57,10 @@ namespace PgManagement.Api.Controllers
         [HttpPost("logout")]
         public async Task<ActionResult> Logout([FromBody] RefreshTokenRequestDto dto)
         {
-            await _auth.RevokeTokenAsync(dto.RefreshToken);
+            if (!string.IsNullOrWhiteSpace(dto?.RefreshToken))
+            {
+                await _auth.RevokeTokenAsync(dto.RefreshToken);
+            }
             return Ok(new { message = "Logged out successfully" });
         }
 

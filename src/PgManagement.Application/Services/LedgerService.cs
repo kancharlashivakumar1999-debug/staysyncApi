@@ -7,10 +7,26 @@ namespace PgManagement.Application.Services
     public class LedgerService : ILedgerService
     {
         private readonly ILedgerRepository _ledgerRepo;
+        private readonly IGuestRepository _guestRepo;
+        private readonly IRoomRepository _roomRepo;
+        private readonly IBranchRepository _branchRepo;
+        private readonly IWhatsAppNotificationService _whatsApp;
+        private readonly IEmailNotificationService _email;
 
-        public LedgerService(ILedgerRepository ledgerRepo)
+        public LedgerService(
+            ILedgerRepository ledgerRepo,
+            IGuestRepository guestRepo,
+            IRoomRepository roomRepo,
+            IBranchRepository branchRepo,
+            IWhatsAppNotificationService whatsApp,
+            IEmailNotificationService email)
         {
             _ledgerRepo = ledgerRepo;
+            _guestRepo = guestRepo;
+            _roomRepo = roomRepo;
+            _branchRepo = branchRepo;
+            _whatsApp = whatsApp;
+            _email = email;
         }
 
         public async Task<TenantChargeDto> AddChargeAsync(CreateChargeDto dto)
@@ -71,6 +87,45 @@ namespace PgManagement.Application.Services
             if (dto.ChargeId.HasValue && dto.ChargeId.Value != Guid.Empty)
             {
                 await _ledgerRepo.MarkChargeAsPaidAsync(dto.ChargeId.Value);
+            }
+
+            // WhatsApp Notification for Payment Receipt
+            try
+            {
+                var guest = await _guestRepo.GetByIdAsync(payment.GuestId);
+                if (guest != null && !string.IsNullOrWhiteSpace(guest.PhoneNumber))
+                {
+                    var branch = await _branchRepo.GetByIdAsync(payment.BranchId);
+                    var room = await _roomRepo.GetByIdAsync(guest.RoomId);
+                    var bed = await _roomRepo.GetBedByIdAsync(guest.BedId);
+
+                    var branchName = branch?.BranchName ?? "Your PG";
+                    var roomNumber = room?.RoomNumber;
+                    var bedNumber = bed?.BedNumber;
+
+                    await _whatsApp.SendPaymentReceiptNotificationAsync(
+                        payment,
+                        guest.FullName,
+                        guest.PhoneNumber,
+                        branchName,
+                        roomNumber,
+                        bedNumber);
+
+                    if (!string.IsNullOrWhiteSpace(guest.Email))
+                    {
+                        await _email.SendPaymentReceiptEmailAsync(
+                            payment,
+                            guest.FullName,
+                            guest.Email,
+                            branchName,
+                            roomNumber,
+                            bedNumber);
+                    }
+                }
+            }
+            catch
+            {
+                // Payment recorded successfully; notification failure should not block or rollback
             }
 
             return new TenantPaymentDto

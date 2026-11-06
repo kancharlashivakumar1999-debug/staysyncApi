@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using PgManagement.Application.Interfaces;
 using PgManagement.Domain.Common;
@@ -9,8 +10,18 @@ namespace PgManagement.Infrastructure.Repositories
     public class BranchRepository : IBranchRepository
     {
         private readonly IDbConnectionFactory _factory;
+        private readonly INoSeriesService _noSeries;
+        private readonly IIdentityInformationService _identity;
 
-        public BranchRepository(IDbConnectionFactory factory) => _factory = factory;
+        public BranchRepository(
+            IDbConnectionFactory factory,
+            INoSeriesService noSeries,
+            IIdentityInformationService identity)
+        {
+            _factory = factory;
+            _noSeries = noSeries;
+            _identity = identity;
+        }
 
         private const string BranchProjectionSql = """
             SELECT b.branch_id AS BranchId,
@@ -45,12 +56,84 @@ namespace PgManagement.Infrastructure.Repositories
         public async Task<Guid> CreateAsync(Branch branch)
         {
             using var conn = _factory.CreateConnection();
-            branch.BranchId = Uuid7.NewGuid();
-            const string sql = @"
-                INSERT INTO branches (branch_id, owner_id, branch_code, branch_name, contact_number, address_line, city, state, pincode, total_floors, created_at, updated_at)
-                VALUES (@BranchId, @OwnerId, fn_next_branch_code(), @BranchName, @ContactNumber, @AddressLine, @City, @State, @Pincode, @TotalFloors, @CreatedAt, @UpdatedAt)
-                RETURNING branch_id;";
-            return await conn.ExecuteScalarAsync<Guid>(sql, branch);
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                var effectiveOwnerId = branch.OwnerId != Guid.Empty ? branch.OwnerId : (_identity.UserId ?? Guid.Empty);
+                branch.BranchId = Uuid7.NewGuid();
+                branch.OwnerId = effectiveOwnerId;
+
+                // 1. First fetch next code inside transaction
+                var code = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "BR", effectiveOwnerId);
+                branch.BranchCode = code;
+
+                // 2. Insert with the generated code
+                const string sql = @"
+                    INSERT INTO branches (branch_id, owner_id, branch_code, branch_name, contact_number, address_line, city, state, pincode, total_floors, created_at, updated_at)
+                    VALUES (@BranchId, @OwnerId, @BranchCode, @BranchName, @ContactNumber, @AddressLine, @City, @State, @Pincode, @TotalFloors, @CreatedAt, @UpdatedAt)
+                    RETURNING branch_id;";
+
+                var id = await conn.ExecuteScalarAsync<Guid>(sql, branch, transaction: tran);
+                tran.Commit();
+                return id;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
+        }
+
+        public async Task<Branch> CreateBranchWithFloorsAsync(Branch branch, List<Floor> floors)
+        {
+            using var conn = _factory.CreateConnection();
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                var effectiveOwnerId = branch.OwnerId != Guid.Empty ? branch.OwnerId : (_identity.UserId ?? Guid.Empty);
+                branch.BranchId = Uuid7.NewGuid();
+                branch.OwnerId = effectiveOwnerId;
+
+                // 1. Fetch next branch code inside transaction (scoped to ownerId)
+                var branchCode = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "BR", effectiveOwnerId);
+                branch.BranchCode = branchCode;
+
+                // 2. Insert branch
+                const string branchSql = @"
+                    INSERT INTO branches (branch_id, owner_id, branch_code, branch_name, contact_number, address_line, city, state, pincode, total_floors, created_at, updated_at)
+                    VALUES (@BranchId, @OwnerId, @BranchCode, @BranchName, @ContactNumber, @AddressLine, @City, @State, @Pincode, @TotalFloors, @CreatedAt, @UpdatedAt)
+                    RETURNING branch_id;";
+
+                var branchId = await conn.ExecuteScalarAsync<Guid>(branchSql, branch, transaction: tran);
+
+                // 3. Insert all floors inside the same transaction (scoped to branchId)
+                const string floorSql = @"
+                    INSERT INTO floors (floor_id, branch_id, floor_code, floor_number, floor_name, description, created_at)
+                    VALUES (@FloorId, @BranchId, @FloorCode, @FloorNumber, @FloorName, @Description, @CreatedAt);";
+
+                foreach (var floor in floors)
+                {
+                    floor.FloorId = Uuid7.NewGuid();
+                    floor.BranchId = branchId;
+                    var floorCode = await _noSeries.GetNextCodeWithTransactionAsync(conn, tran, "FL", branchId);
+                    floor.FloorCode = floorCode;
+
+                    await conn.ExecuteAsync(floorSql, floor, transaction: tran);
+                }
+
+                // If any floor fails or throws, transaction will roll back everything!
+                tran.Commit();
+
+                branch.Floors = floors;
+                return branch;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
         }
 
         public async Task<bool> DeleteAsync(Guid branchId)

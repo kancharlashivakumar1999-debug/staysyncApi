@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using PgManagement.Application.Interfaces;
 using PgManagement.Domain.Common;
@@ -87,6 +88,61 @@ namespace PgManagement.Infrastructure.Repositories
                     @ProofDocumentNumber, @ProofDocumentUrl, @Status, @CreatedAt, @UpdatedAt
                 ) RETURNING guest_id;";
             return await conn.ExecuteScalarAsync<Guid>(sql, guest);
+        }
+
+        public async Task<Guid> CheckInGuestWithOccupancyAsync(Guest guest)
+        {
+            using var conn = _factory.CreateConnection();
+            if (conn.State != ConnectionState.Open) conn.Open();
+            using var tran = conn.BeginTransaction();
+            try
+            {
+                // Verify bed is still vacant inside transaction with row lock
+                const string checkBedSql = "SELECT is_occupied FROM beds WHERE bed_id = @BedId FOR UPDATE;";
+                var isOccupied = await conn.ExecuteScalarAsync<bool?>(checkBedSql, new { guest.BedId }, transaction: tran);
+                if (isOccupied == true)
+                {
+                    throw new InvalidOperationException("This bed has already been occupied by another resident.");
+                }
+
+                guest.GuestId = Uuid7.NewGuid();
+                // Generate guest code
+                var code = await conn.ExecuteScalarAsync<string>(
+                    "SELECT config.next_doc_no('G', @BranchId);",
+                    new { guest.BranchId },
+                    transaction: tran
+                ) ?? ("G-" + Guid.NewGuid().ToString().Substring(0, 4));
+                guest.GuestCode = code;
+
+                const string guestSql = @"
+                    INSERT INTO guests (
+                        guest_id, guest_code, owner_id, branch_id, floor_id, room_id, bed_id, full_name, email, phone_number,
+                        emergency_contact, age, gender, occupation, workplace_or_college, tenant_type,
+                        advance_amount, monthly_rent, daily_rent, joining_date, expected_vacating_date,
+                        days_before_vacate_reminder, vacate_notice_served, proof_document_type,
+                        proof_document_number, proof_document_url, status, created_at, updated_at
+                    ) VALUES (
+                        @GuestId, @GuestCode, @OwnerId, @BranchId, @FloorId, @RoomId, @BedId, @FullName, @Email, @PhoneNumber,
+                        @EmergencyContact, @Age, @Gender, @Occupation, @WorkplaceOrCollege, @TenantType,
+                        @AdvanceAmount, @MonthlyRent, @DailyRent, @JoiningDate, @ExpectedVacatingDate,
+                        @DaysBeforeVacateReminder, @VacateNoticeServed, @ProofDocumentType,
+                        @ProofDocumentNumber, @ProofDocumentUrl, @Status, @CreatedAt, @UpdatedAt
+                    ) RETURNING guest_id;";
+
+                var guestId = await conn.ExecuteScalarAsync<Guid>(guestSql, guest, transaction: tran);
+
+                // Update bed status in the exact same transaction
+                const string updateBedSql = "UPDATE beds SET is_occupied = TRUE, status = 'Occupied' WHERE bed_id = @BedId;";
+                await conn.ExecuteAsync(updateBedSql, new { guest.BedId }, transaction: tran);
+
+                tran.Commit();
+                return guestId;
+            }
+            catch
+            {
+                tran.Rollback();
+                throw;
+            }
         }
 
         public async Task SettleAndVacateAsync(Guid guestId, decimal returnedAmount, decimal deductionsAmount, string? notes, DateTime vacateDate)

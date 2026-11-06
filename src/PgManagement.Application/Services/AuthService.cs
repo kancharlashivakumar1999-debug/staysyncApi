@@ -13,11 +13,13 @@ namespace PgManagement.Application.Services
     public class AuthService : IAuthService
     {
         private readonly IOwnerRepository _ownerRepo;
+        private readonly IBranchRepository _branchRepo;
         private readonly IConfiguration _config;
 
-        public AuthService(IOwnerRepository ownerRepo, IConfiguration config)
+        public AuthService(IOwnerRepository ownerRepo, IBranchRepository branchRepo, IConfiguration config)
         {
             _ownerRepo = ownerRepo;
+            _branchRepo = branchRepo;
             _config = config;
         }
 
@@ -87,16 +89,31 @@ namespace PgManagement.Application.Services
             var handler = new JwtSecurityTokenHandler();
             var key = Encoding.UTF8.GetBytes(_config["Jwt:Key"] ?? "SecretKeyForHostelPGManagementSystem2026SecureJwtSecretKey");
 
+            // Fetch owner's associated branches
+            var branches = (await _branchRepo.GetByOwnerIdAsync(owner.OwnerId)).ToList();
+            var branchIdList = branches.Select(b => b.BranchId).ToList();
+
+            var claims = new List<Claim>
+            {
+                new Claim("ownerId", owner.OwnerId.ToString()),
+                new Claim("ownerCode", owner.OwnerCode),
+                new Claim(ClaimTypes.NameIdentifier, owner.OwnerId.ToString()),
+                new Claim(ClaimTypes.Email, owner.Email),
+                new Claim(ClaimTypes.Name, owner.FullName),
+                new Claim("phoneNumber", owner.PhoneNumber ?? string.Empty),
+                new Claim(ClaimTypes.Role, "Owner"),
+                new Claim("role", "Owner")
+            };
+
+            foreach (var bId in branchIdList)
+            {
+                claims.Add(new Claim("branchIds", bId.ToString()));
+            }
+
             var descriptor = new SecurityTokenDescriptor
             {
-                Subject = new ClaimsIdentity(new[]
-                {
-                    new Claim("ownerId", owner.OwnerId.ToString()),
-                    new Claim("ownerCode", owner.OwnerCode),
-                    new Claim(ClaimTypes.Email, owner.Email),
-                    new Claim(ClaimTypes.Name, owner.FullName)
-                }),
-                Expires = DateTime.UtcNow.AddHours(4),
+                Subject = new ClaimsIdentity(claims),
+                Expires = DateTime.UtcNow.AddMinutes(60), // 60 minutes expiry
                 SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature),
                 Issuer = _config["Jwt:Issuer"] ?? "PgManagementApi",
                 Audience = _config["Jwt:Audience"] ?? "PgManagementApp"
@@ -104,7 +121,7 @@ namespace PgManagement.Application.Services
 
             var token = handler.WriteToken(handler.CreateToken(descriptor));
             var refreshToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
-            await _ownerRepo.SaveRefreshTokenAsync(owner.OwnerId, refreshToken, DateTime.UtcNow.AddDays(7));
+            await _ownerRepo.SaveRefreshTokenAsync(owner.OwnerId, refreshToken, DateTime.UtcNow.AddDays(7)); // 7 days refresh token
 
             return new AuthResponseDto
             {
@@ -114,6 +131,8 @@ namespace PgManagement.Application.Services
                 Email = owner.Email,
                 PhoneNumber = owner.PhoneNumber,
                 ExpectedBranches = owner.ExpectedBranches,
+                Role = "Owner",
+                BranchIds = branchIdList,
                 Token = token,
                 RefreshToken = refreshToken
             };

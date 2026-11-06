@@ -8,6 +8,7 @@ namespace PgManagement.Application.Interfaces
         Task<IEnumerable<Room>> GetByFloorIdAsync(Guid floorId);
         Task<Room?> GetByIdAsync(Guid roomId);
         Task<Guid> CreateAsync(Room room);
+        Task<Room> CreateRoomWithBedsAsync(Room room, List<Bed> beds);
         Task<bool> UpdateAsync(Guid roomId, UpdateRoomDto dto);
         Task<bool> DeleteAsync(Guid roomId);
 

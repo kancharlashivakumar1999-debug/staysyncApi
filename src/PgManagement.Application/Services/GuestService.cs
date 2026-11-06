@@ -8,11 +8,22 @@ namespace PgManagement.Application.Services
     {
         private readonly IGuestRepository _guestRepo;
         private readonly IRoomRepository _roomRepo;
+        private readonly IBranchRepository _branchRepo;
+        private readonly IWhatsAppNotificationService _whatsApp;
+        private readonly IEmailNotificationService _email;
 
-        public GuestService(IGuestRepository guestRepo, IRoomRepository roomRepo)
+        public GuestService(
+            IGuestRepository guestRepo,
+            IRoomRepository roomRepo,
+            IBranchRepository branchRepo,
+            IWhatsAppNotificationService whatsApp,
+            IEmailNotificationService email)
         {
             _guestRepo = guestRepo;
             _roomRepo = roomRepo;
+            _branchRepo = branchRepo;
+            _whatsApp = whatsApp;
+            _email = email;
         }
 
         public async Task<IEnumerable<GuestDto>> GetGuestsAsync(Guid ownerId, Guid? branchId = null)
@@ -66,6 +77,11 @@ namespace PgManagement.Application.Services
 
         public async Task<Guest> CheckInGuestAsync(GuestDto dto)
         {
+            if (string.IsNullOrWhiteSpace(dto.Email))
+            {
+                throw new InvalidOperationException("Email address is mandatory for check-in.");
+            }
+
             var bed = await _roomRepo.GetBedByIdAsync(dto.BedId);
             if (bed == null) throw new InvalidOperationException("Selected bed not found.");
             if (bed.IsOccupied) throw new InvalidOperationException("Bed is already occupied!");
@@ -78,7 +94,7 @@ namespace PgManagement.Application.Services
                 RoomId = dto.RoomId,
                 BedId = dto.BedId,
                 FullName = dto.FullName,
-                Email = dto.Email,
+                Email = dto.Email.Trim(),
                 PhoneNumber = dto.PhoneNumber,
                 EmergencyContact = dto.EmergencyContact,
                 Age = dto.Age,
@@ -97,9 +113,27 @@ namespace PgManagement.Application.Services
                 Status = "Active"
             };
 
-            var id = await _guestRepo.CreateAsync(guest);
-            await _roomRepo.UpdateBedOccupancyAsync(dto.BedId, true, "Occupied");
-            return (await _guestRepo.GetByIdAsync(id)) ?? guest;
+            var id = await _guestRepo.CheckInGuestWithOccupancyAsync(guest);
+            var created = (await _guestRepo.GetByIdAsync(id)) ?? guest;
+
+            // Trigger WhatsApp Check-In Notification
+            try
+            {
+                var branch = await _branchRepo.GetByIdAsync(created.BranchId);
+                var room = await _roomRepo.GetByIdAsync(created.RoomId);
+                var branchName = branch?.BranchName ?? "Your PG";
+                var roomNum = room?.RoomNumber ?? "Room";
+                var bedNum = bed?.BedNumber ?? "Bed";
+
+                await _whatsApp.SendCheckInNotificationAsync(created, branchName, roomNum, bedNum);
+                await _email.SendCheckInEmailAsync(created, branchName, roomNum, bedNum);
+            }
+            catch
+            {
+                // Notification failure should not abort successful check-in
+            }
+
+            return created;
         }
 
         public async Task<bool> VacateGuestAsync(Guid guestId, VacateSettlementDto dto)

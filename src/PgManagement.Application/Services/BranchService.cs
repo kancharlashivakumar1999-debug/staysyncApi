@@ -65,10 +65,8 @@ namespace PgManagement.Application.Services
                 TotalFloors = dto.TotalFloors > 0 ? dto.TotalFloors : 1
             };
 
-            var id = await _branchRepo.CreateAsync(branch);
-            var created = await _branchRepo.GetByIdAsync(id);
-
-            // Auto-create floors
+            // Prepare floor definitions
+            var floorsToCreate = new List<Floor>();
             for (int i = 0; i < branch.TotalFloors; i++)
             {
                 var floorName = i == 0 ? "Ground Floor" : $"{i}st Floor";
@@ -76,16 +74,17 @@ namespace PgManagement.Application.Services
                 else if (i == 3) floorName = "3rd Floor";
                 else if (i > 3) floorName = $"{i}th Floor";
 
-                await _floorRepo.CreateAsync(new Floor
+                floorsToCreate.Add(new Floor
                 {
-                    BranchId = id,
                     FloorNumber = i,
                     FloorName = floorName,
                     Description = $"{floorName} layout"
                 });
             }
 
-            return created ?? branch;
+            // Create Branch + all initial Floors atomically under a single database transaction
+            var createdBranch = await _branchRepo.CreateBranchWithFloorsAsync(branch, floorsToCreate);
+            return createdBranch;
         }
 
         public async Task<bool> DeleteBranchAsync(Guid branchId) => await _branchRepo.DeleteAsync(branchId);
